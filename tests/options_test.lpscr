@@ -1,0 +1,80 @@
+@mode(host.scripted)
+
+# Unit tests for cronnext's command-line parser (lib/options.lpscr):
+# defaults, short and long options, modes and usage errors.
+#
+# Runtime: host.scripted, run by the test runner: `make test` interprets
+# this file with Stage0 (`loup-bootstrap test --no-parallel --file`), one
+# test per `func test_*()`. It imports lib/ with relative imports. It is not
+# part of the program.
+
+from debug.assert import (expect, expectEq);
+from ..lib.options import (Options, Mode, mode_option, parse_args, parse_count);
+
+func ok(argv: list[string]): Options {
+    return parse_args(argv).unwrap();
+}
+
+func err(argv: list[string]): string {
+    return match parse_args(argv) {
+        Ok(_) => "parsed",
+        Err(msg) => msg,
+    };
+}
+
+func test_defaults(): void {
+    let o = ok(["@daily"]);
+    expectEq(o.count, -1, "no count given");
+    expectEq(o.start, "now", "start");
+    expectEq(o.until, "", "no end");
+    expectEq(mode_option(o.mode), "", "merged list");
+    expect(!o.iso and !o.relative and !o.system_crontab and !o.help and !o.version, "flags");
+    expectEq(o.schedules.join("|"), "@daily", "operand");
+    expectEq(o.files.len(), 0, "no files");
+}
+
+func test_short_options(): void {
+    let o = ok(["-n3", "-sr", "-f", "a.cron", "-fb.cron", "-l"]);
+    expectEq(o.count, 3, "attached count");
+    expect(o.system_crontab and o.relative, "cluster");
+    expectEq(o.files.join(","), "a.cron,b.cron", "repeated -f");
+    expectEq(mode_option(o.mode), "--each", "-l");
+}
+
+func test_long_options(): void {
+    let o = ok(["--from", "2026-10-20", "--until=2026-11-01", "--count=0", "--iso", "--explain", "0 9 * * *", "--file=-"]);
+    expectEq(o.start, "2026-10-20", "from");
+    expectEq(o.until, "2026-11-01", "until");
+    expectEq(o.count, 0, "zero is a count");
+    expect(o.iso, "iso");
+    expectEq(mode_option(o.mode), "--explain", "explain");
+    expectEq(o.files.join(","), "-", "standard input");
+}
+
+func test_operands_and_double_dash(): void {
+    let o = ok(["*/5 * * * *", "--", "-n"]);
+    expectEq(o.schedules.join("|"), "*/5 * * * *|-n", "-- ends the options");
+    expect(ok(["-c", "-f", "x"]).mode == Mode.Check, "check mode");
+}
+
+func test_help_and_version_need_no_schedule(): void {
+    expect(ok(["-h"]).help, "-h");
+    expect(ok(["--version"]).version, "--version");
+}
+
+func test_usage_errors(): void {
+    expectEq(err([]), "no schedule given (give SCHEDULE operands or -f FILE)", "nothing to do");
+    expectEq(err(["--bogus"]), "unrecognized option '--bogus'", "unknown long");
+    expectEq(err(["-x"]), "invalid option -- 'x'", "unknown short");
+    expectEq(err(["-n"]), "option requires an argument -- 'n'", "missing short value");
+    expectEq(err(["--until"]), "option '--until' requires an argument", "missing long value");
+    expectEq(err(["--iso=yes", "@daily"]), "option '--iso' doesn't allow an argument", "flag with a value");
+    expectEq(err(["-n", "ten", "@daily"]), "invalid count 'ten'", "bad count");
+    expectEq(err(["-e", "-l", "@daily"]), "--explain and --each cannot be combined", "two modes");
+    expectEq(err(["-c", "--check", "@daily"]), "parsed", "the same mode twice");
+}
+
+func test_parse_count(): void {
+    expectEq(parse_count("25").unwrap_or(-1), 25, "digits");
+    expect(parse_count("-1").is_none() and parse_count("").is_none() and parse_count("1234567890").is_none(), "rejected");
+}

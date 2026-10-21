@@ -1,0 +1,102 @@
+@mode(host.scripted)
+
+# Unit tests for cronnext's schedules (lib/schedule.lpscr): macros, parse
+# errors, cron's day rule and the search for the next run. Expected times
+# were checked against a brute-force reference that tests every minute.
+#
+# Runtime: host.scripted, run by the test runner: `make test` interprets
+# this file with Stage0 (`loup-bootstrap test --no-parallel --file`), one
+# test per `func test_*()`. It imports lib/ with relative imports. It is not
+# part of the program.
+
+from debug.assert import (expect, expectEq);
+from ..lib.clock import (minute_at, format_iso);
+from ..lib.schedule import (Schedule, parse_schedule, macro_fields, day_matches, runs_at, next_run, runs_of, HORIZON);
+
+func sched(text: string): Schedule {
+    return parse_schedule(text).unwrap();
+}
+
+func error_of(text: string): string {
+    return match parse_schedule(text) {
+        Ok(_) => "parsed",
+        Err(message) => message,
+    };
+}
+
+# The first run at or after `start`, in ISO form.
+func next_iso(text: string, start: string): string {
+    let s = sched(text);
+    let at = minute_at(start.slice(0, 4).toInt(), start.slice(5, 7).toInt(), start.slice(8, 10).toInt(),
+        start.slice(11, 13).toInt(), start.slice(14, 16).toInt());
+    return match next_run(s, at, at + HORIZON) {
+        Some(found) => format_iso(found),
+        None => "never",
+    };
+}
+
+func test_macros(): void {
+    expectEq(macro_fields("@daily").unwrap(), "0 0 * * *", "daily");
+    expectEq(macro_fields("@ANNUALLY").unwrap(), "0 0 1 1 *", "any case");
+    expect(macro_fields("@sometimes").is_none(), "unknown");
+    let weekly = sched("@weekly");
+    expectEq(weekly.text, "@weekly", "keeps the macro as written");
+    expectEq(weekly.weekday.values.len(), 1, "one weekday");
+}
+
+func test_parse_errors(): void {
+    expectEq(error_of("* * * *"), "expected 5 fields, found 4 in '* * * *'", "four fields");
+    expectEq(error_of("@reboot"), "@reboot runs only when cron starts", "reboot");
+    expectEq(error_of("@fortnightly"), "unknown macro '@fortnightly'", "unknown macro");
+    expectEq(error_of("0 0 * 13 *"), "bad month field '13': 13 is out of range 1-12", "field error");
+}
+
+func test_day_rule(): void {
+    let either = sched("0 0 13 * 5");
+    expect(day_matches(either, 13, 2), "the 13th, a Tuesday");
+    expect(day_matches(either, 20, 5), "a Friday, the 20th");
+    expect(!day_matches(either, 14, 6), "neither");
+    let both = sched("0 0 */2 * 1");
+    expect(day_matches(both, 9, 1), "an odd day that is a Monday");
+    expect(!day_matches(both, 10, 1), "a Monday on an even day");
+    expect(!day_matches(both, 9, 2), "an odd day that is not a Monday");
+    let weekdays_only = sched("0 0 * * mon-fri");
+    expect(day_matches(weekdays_only, 31, 3) and !day_matches(weekdays_only, 1, 0), "weekdays");
+}
+
+func test_runs_at(): void {
+    let s = sched("*/15 9-17 * * mon-fri");
+    expect(runs_at(s, minute_at(2026, 10, 20, 9, 45)), "Tuesday 09:45");
+    expect(!runs_at(s, minute_at(2026, 10, 20, 9, 46)), "09:46");
+    expect(!runs_at(s, minute_at(2026, 10, 24, 9, 45)), "Saturday");
+}
+
+func test_next_run(): void {
+    expectEq(next_iso("*/7 * * * *", "2026-10-20 14:37"), "2026-10-20T14:42:00Z", "next step in the hour");
+    expectEq(next_iso("*/7 * * * *", "2026-10-20 14:57"), "2026-10-20T15:00:00Z", "into the next hour");
+    expectEq(next_iso("0 9 * * *", "2026-10-20 09:00"), "2026-10-20T09:00:00Z", "at the start itself");
+    expectEq(next_iso("59 23 31 12 *", "2026-10-20 14:37"), "2026-12-31T23:59:00Z", "end of the year");
+    expectEq(next_iso("0 0 1 1 *", "2026-12-31 23:59"), "2027-01-01T00:00:00Z", "into the next year");
+    expectEq(next_iso("0 0 31 * *", "2026-04-15 00:00"), "2026-05-31T00:00:00Z", "skips months without a 31st");
+}
+
+func test_leap_days(): void {
+    expectEq(next_iso("15 3 29 2 *", "2026-10-20 00:00"), "2028-02-29T03:15:00Z", "the next leap day");
+    expectEq(next_iso("15 3 29 2 *", "2099-03-01 00:00"), "2104-02-29T03:15:00Z", "2100 is not a leap year");
+    expectEq(next_iso("0 0 29 2 1", "2026-10-20 00:00"), "2027-02-01T00:00:00Z", "or any Monday in February");
+}
+
+func test_never(): void {
+    expectEq(next_iso("0 0 30 2 *", "2026-01-01 00:00"), "never", "February 30th");
+    expectEq(next_iso("0 0 31 4,6,9,11 *", "2026-01-01 00:00"), "never", "31st of a 30-day month");
+}
+
+func test_runs_of(): void {
+    let s = sched("0 */8 * * *");
+    let start = minute_at(2026, 10, 20, 0, 0);
+    let runs = runs_of(s, start, start + HORIZON, 4);
+    let shown: list[string] = [format_iso(r) for r in runs];
+    expectEq(shown.join(" "), "2026-10-20T00:00:00Z 2026-10-20T08:00:00Z 2026-10-20T16:00:00Z 2026-10-21T00:00:00Z", "four runs");
+    expectEq(runs_of(s, start, start + 600, 10).len(), 2, "the limit cuts the list");
+    expectEq(runs_of(s, start, start + HORIZON, 0).len(), 0, "none asked for");
+}

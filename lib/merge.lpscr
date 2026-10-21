@@ -1,0 +1,51 @@
+@mode(host.scripted)
+
+# cronnext's merge: the run times of many schedules in one time-ordered
+# list.
+#
+# Runtime: host.scripted. A module of the script bin/cronnext.lpscr,
+# interpreted with it by `loup run`; tests/merge_test.lpscr imports it
+# under Stage0's test runner.
+#
+# Each schedule produces its runs in order, one at a time (next_run). A
+# priority queue holds the next run of every schedule, as an (minute,
+# schedule index) pair, so the earliest is always on top: pop it, print it,
+# and push that schedule's following run. Equal minutes come out in input
+# order because the index breaks the tie. The work is proportional to the
+# runs printed, however many schedules there are.
+
+from structures.priority_queue import (PriorityQueue);
+from .schedule import (Schedule, next_run);
+
+# Earlier minute first; for the same minute, the earlier schedule.
+func earlier(a: (int, int), b: (int, int)): int {
+    if (a.0 != b.0) {
+        return if (a.0 < b.0) { -1 } else { 1 };
+    }
+    return a.1 - b.1;
+}
+
+# The first `count` runs (or all, when count is None) at or after `start`
+# and before `limit`, over all schedules, as (minute, schedule index) pairs.
+pub func merged_runs(schedules: list[Schedule], start: int, limit: int, count: Option[int]): list[(int, int)] {
+    let queue: PriorityQueue[(int, int)] = PriorityQueue(earlier);
+    for (k in 0..schedules.len()) {
+        match next_run(schedules[k], start, limit) {
+            Some(at) => { safe { queue.push((at, k)); } },
+            None => {},
+        }
+    }
+    let wanted = count ?? -1;
+    var runs: list[(int, int)] = [];
+    while (!queue.isEmpty() and runs.len() != wanted) {
+        var top = (0, 0);
+        safe { top = queue.pop(); }
+        runs.push(top);
+        let (at, k) = top;
+        match next_run(schedules[k], at + 1, limit) {
+            Some(following) => { safe { queue.push((following, k)); } },
+            None => {},
+        }
+    }
+    return runs;
+}

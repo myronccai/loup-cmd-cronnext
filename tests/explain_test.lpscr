@@ -1,0 +1,55 @@
+@mode(host.scripted)
+
+# Unit tests for cronnext's explanations (lib/explain.lpscr): word lists,
+# ordinals, and whole schedules in English.
+#
+# Runtime: host.scripted, run by the test runner: `make test` interprets
+# this file with Stage0 (`loup-bootstrap test --no-parallel --file`), one
+# test per `func test_*()`. It imports lib/ with relative imports. It is not
+# part of the program.
+
+from debug.assert import (expectEq);
+from ..lib.schedule import (parse_schedule);
+from ..lib.explain import (join_words, ordinal, describe);
+
+func said(text: string): string {
+    return describe(parse_schedule(text).unwrap());
+}
+
+func test_join_words(): void {
+    expectEq(join_words([]), "", "none");
+    expectEq(join_words(["a"]), "a", "one");
+    expectEq(join_words(["a", "b"]), "a and b", "two");
+    expectEq(join_words(["a", "b", "c"]), "a, b and c", "three");
+}
+
+func test_ordinal(): void {
+    let words: list[string] = [ordinal(n) for n in [1, 2, 3, 4, 11, 12, 13, 21, 22, 23, 101, 111]];
+    expectEq(words.join(" "), "1st 2nd 3rd 4th 11th 12th 13th 21st 22nd 23rd 101st 111th", "suffixes");
+}
+
+func test_times_of_day(): void {
+    expectEq(said("* * * * *"), "every minute", "every minute");
+    expectEq(said("*/15 * * * *"), "every 15 minutes", "a step");
+    expectEq(said("30 9 * * *"), "at 09:30", "one time");
+    expectEq(said("0 9,17 * * *"), "at 09:00 and 17:00", "two times");
+    expectEq(said("5 * * * *"), "at minute 5 of every hour", "hourly");
+    expectEq(said("0 */2 * * *"), "at minute 0 past every 2nd hour", "every other hour");
+    expectEq(said("23 0-20/2 * * *"), "at minute 23 past every 2nd hour from 00:00 through 20:59", "a partial hour step");
+    expectEq(said("*/10 9-17 * * *"), "every 10 minutes between 09:00 and 17:59", "office hours");
+    expectEq(said("* 3 * * *"), "every minute between 03:00 and 03:59", "one hour");
+    expectEq(said("0,30 * * * *"), "at minutes 0 and 30 of every hour", "two minutes");
+    expectEq(said("1-5 * * * *"), "at minutes 1 through 5 of every hour", "a minute range");
+}
+
+func test_days_and_months(): void {
+    expectEq(said("*/15 9-17 * * mon-fri"), "every 15 minutes between 09:00 and 17:59, on Monday through Friday", "weekdays");
+    expectEq(said("0 0 1 */3 *"), "at 00:00, on day 1 of the month, in every 3rd month", "quarterly");
+    expectEq(said("30 4 1,15 * 5"), "at 04:30, on days 1 and 15 of the month or on Friday", "either day field");
+    expectEq(said("0 0 */2 * 1"), "at 00:00, on every 2nd day of the month, if that day is also Monday", "both day fields");
+    expectEq(said("@weekly"), "at 00:00, on Sunday", "a macro");
+    expectEq(said("5 0 * aug *"), "at 00:05, in August", "a month");
+    expectEq(said("0 12 * jun-aug sat,sun"), "at 12:00, on Saturday and Sunday, in June through August", "summer weekends");
+    expectEq(said("0 0 1-7 * *"), "at 00:00, on days 1 through 7 of the month", "the first week");
+    expectEq(said("0 8 * * 7"), "at 08:00, on Sunday", "7 is Sunday");
+}

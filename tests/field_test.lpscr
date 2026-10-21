@@ -1,0 +1,88 @@
+@mode(host.scripted)
+
+# Unit tests for cronnext's cron fields (lib/field.lpscr): values and names,
+# each kind of list item, the values a field allows, and the errors.
+#
+# Runtime: host.scripted, run by the test runner: `make test` interprets
+# this file with Stage0 (`loup-bootstrap test --no-parallel --file`), one
+# test per `func test_*()`. It imports lib/ with relative imports
+# (`from ..lib.field`). It is not part of the program.
+
+from debug.assert import (expect, expectEq);
+from ..lib.field import (FieldKind, Part, Field, bounds, value_of, parse_part, parse_field);
+
+func values(kind: FieldKind, text: string): string {
+    return match parse_field(kind, text) {
+        Ok(f) => {
+            let shown: list[string] = [str(v) for v in f.values];
+            shown.join(",")
+        },
+        Err(message) => message,
+    };
+}
+
+func test_bounds(): void {
+    let (least, most) = bounds(FieldKind.DayOfWeek);
+    expectEq(least, 0, "Sunday");
+    expectEq(most, 7, "Sunday again");
+    expectEq(bounds(FieldKind.DayOfMonth).0, 1, "days start at 1");
+}
+
+func test_values_and_names(): void {
+    expectEq(value_of(FieldKind.Minute, "07").unwrap(), 7, "leading zero");
+    expectEq(value_of(FieldKind.Month, "Mar").unwrap(), 3, "month name, any case");
+    expectEq(value_of(FieldKind.DayOfWeek, "SAT").unwrap(), 6, "weekday name");
+    expect(value_of(FieldKind.Hour, "mon").is_err(), "names only where they belong");
+    expectEq(value_of(FieldKind.Minute, "x1").unwrap_err(), "'x1' is not a number or a name", "message");
+}
+
+func test_parts(): void {
+    match parse_part(FieldKind.Minute, "*/15").unwrap() {
+        Part.Stepped(lo, hi, step) => { expectEq(str(lo) + "-" + str(hi) + "/" + str(step), "0-59/15", "star step"); },
+        _ => { expect(false, "*/15 is a step"); },
+    }
+    match parse_part(FieldKind.Hour, "5/6").unwrap() {
+        Part.Stepped(lo, hi, step) => { expectEq(str(lo) + "-" + str(hi) + "/" + str(step), "5-23/6", "a value with a step runs to the end"); },
+        _ => { expect(false, "5/6 is a step"); },
+    }
+    match parse_part(FieldKind.DayOfWeek, "mon-fri").unwrap() {
+        Part.Span(lo, hi) => { expectEq(str(lo) + "-" + str(hi), "1-5", "named range"); },
+        _ => { expect(false, "mon-fri is a span"); },
+    }
+    match parse_part(FieldKind.Month, "dec").unwrap() {
+        Part.Single(v) => { expectEq(v, 12, "named month"); },
+        _ => { expect(false, "dec is one value"); },
+    }
+    match parse_part(FieldKind.Minute, "*").unwrap() {
+        Part.Every => {},
+        _ => { expect(false, "* is every value"); },
+    }
+}
+
+func test_field_values(): void {
+    expectEq(values(FieldKind.Minute, "*/20"), "0,20,40", "every 20 minutes");
+    expectEq(values(FieldKind.Minute, "0,30,15"), "0,15,30", "sorted");
+    expectEq(values(FieldKind.Hour, "9-17/4"), "9,13,17", "range with a step");
+    expectEq(values(FieldKind.DayOfMonth, "1,15,1"), "1,15", "no repeats");
+    expectEq(values(FieldKind.Month, "jan-mar,oct"), "1,2,3,10", "names");
+    expectEq(values(FieldKind.DayOfWeek, "5-7"), "0,5,6", "7 is Sunday");
+    expectEq(values(FieldKind.DayOfWeek, "*/2"), "0,2,4,6", "every other day");
+}
+
+func test_restricted(): void {
+    expect(!parse_field(FieldKind.DayOfMonth, "*").unwrap().restricted, "*");
+    expect(!parse_field(FieldKind.DayOfMonth, "*/2").unwrap().restricted, "a star step counts as *");
+    expect(parse_field(FieldKind.DayOfMonth, "1-31").unwrap().restricted, "a full range does not");
+}
+
+func test_errors(): void {
+    expectEq(values(FieldKind.Minute, "60"), "bad minute field '60': 60 is out of range 0-59", "too large");
+    expectEq(values(FieldKind.DayOfMonth, "0"), "bad day-of-month field '0': 0 is out of range 1-31", "too small");
+    expectEq(values(FieldKind.Hour, "3-25"), "bad hour field '3-25': 25 is out of range 0-23", "range end");
+    expectEq(values(FieldKind.DayOfWeek, "fri-mon"), "bad day-of-week field 'fri-mon': the range fri-mon runs backwards", "backwards");
+    expectEq(values(FieldKind.Minute, "*/0"), "bad minute field '*/0': step 0 is out of range 1-59", "step 0");
+    expectEq(values(FieldKind.Month, "1,,2"), "bad month field '1,,2': an empty list item", "empty item");
+    expectEq(values(FieldKind.Minute, "1-2-3"), "bad minute field '1-2-3': '1-2-3' is not a value, a range or a step", "shape");
+    expectEq(values(FieldKind.Month, "*/x"), "bad month field '*/x': '*/x' is not a value, a range or a step", "named step");
+    expectEq(values(FieldKind.Hour, "12345"), "bad hour field '12345': 12345 is out of range", "long number");
+}

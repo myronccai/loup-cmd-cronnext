@@ -1,0 +1,54 @@
+@mode(host.scripted)
+
+# The text cronnext prints for --help and --version.
+#
+# Runtime: host.scripted. A module of the script bin/cronnext.lpscr,
+# interpreted with it by `loup run`; tests/e2e.sh checks its output there.
+
+from .appinfo import (APP_NAME, APP_VERSION);
+
+# A plain multiline string (interpolated `i"""` strings print nothing in
+# Loup 1.26): it starts after the first line break and ends at the closing
+# quotes, with no final newline.
+let USAGE_TEXT: string = """
+usage: cronnext [OPTION]... [SCHEDULE]...
+
+Print the next run times of cron schedules, merged in time order, with the
+schedule or crontab line each comes from. A SCHEDULE is five fields or a
+macro, optionally followed by a command: '*/15 9-17 * * mon-fri', '@daily'.
+All times are UTC.
+
+Input:
+  -f, --file FILE       read a crontab (repeatable; - is standard input)
+  -s, --system          crontab lines have a user field, as in /etc/crontab
+
+Times:
+  -n, --count N         print N run times (default 10; with --until, all)
+      --from TIME       start at TIME (default now)
+      --until TIME      stop before TIME
+                        TIME: now, YYYY-MM-DD, YYYY-MM-DD[T ]HH:MM[:SS][Z]
+                        or @SECONDS since 1970
+
+Output (one at a time; the default is one merged list):
+  -l, --each            list the runs of each schedule separately
+  -e, --explain         describe each schedule in words, with its next run
+  -c, --check           only report invalid lines
+      --iso             print times as ISO 8601 (2026-10-20T15:00:00Z)
+  -r, --relative        also print how long until each run
+
+  -h, --help            display this help and exit
+  -V, --version         output version information and exit
+
+Under `loup run`, long options go after `--`:
+  loup run bin/cronnext.lpscr -- --from 2026-10-20 '0 9 * * mon'
+
+Exit status: 0 success, 1 an unreadable input or an invalid schedule,
+2 usage error.""";
+
+pub func usage(): string {
+    return USAGE_TEXT;
+}
+
+pub func version_line(): string {
+    return i"{$ APP_NAME $} (loup-cmd-{$ APP_NAME $}) {$ APP_VERSION $}";
+}

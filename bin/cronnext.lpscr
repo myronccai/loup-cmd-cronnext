@@ -1,0 +1,199 @@
+#!/usr/bin/env -S loup run
+@mode(host.scripted)
+
+# cronnext: print the next run times of cron schedules and crontab files,
+# merged in time order, explain schedules in words, or check a crontab.
+#
+# Runtime: host.scripted. The program's entry point: the Loup scripted
+# runtime interprets this file from source (`loup run bin/cronnext.lpscr --
+# ARGS`, as `make run`, tests/e2e.sh and CI do; on Linux x86-64 that is the
+# self-hosted driver). Its top-level statements run in order and there is no
+# compile step: a script entry cannot be compiled, so the project has no
+# binary. `make check` type-checks it, with every lib/ module it imports,
+# using Stage0 (`loup-bootstrap check`). Long options must follow `--`:
+# `loup run` drops a `--long` word that comes before it.
+#
+# Structure: this script is the top level, the only code that reads files,
+# prints and sets the exit status. It parses the command line and the
+# times (usage errors exit 2), turns operands and crontab files into
+# entries (bad lines are reported and make the status 1), drops schedules
+# that never run, then prints what the mode asks for.
+
+from io.fs import (isDir);
+from core.time import (Instant);
+from core.string_utils import (padRight);
+from ..lib.appinfo import (APP_NAME, EXIT_OK, EXIT_FAILURE, EXIT_USAGE);
+from ..lib.options import (Options, Mode, DEFAULT_COUNT, parse_args);
+from ..lib.usage import (usage, version_line);
+from ..lib.clock import (parse_time, format_human, format_iso, format_wait);
+from ..lib.schedule import (Schedule, next_run, runs_of, macro_fields, HORIZON);
+from ..lib.crontab import (Entry, Note, origin_label, entry_title, parse_operand, read_crontab);
+from ..lib.merge import (merged_runs);
+from ..lib.explain import (describe);
+
+func usage_error(message: string): void {
+    printErr(i"{$ APP_NAME $}: {$ message $}");
+    printErr(i"Try '{$ APP_NAME $} --help' for more information.");
+    exit(EXIT_USAGE);
+}
+
+let parsed = parse_args(args());
+if (parsed.is_err()) {
+    usage_error(parsed.unwrap_err());
+}
+let opts: Options = parsed.unwrap();
+if (opts.help) {
+    println(usage());
+    exit(EXIT_OK);
+}
+if (opts.version) {
+    println(version_line());
+    exit(EXIT_OK);
+}
+
+# The window: runs at or after `start` and before `limit`; at most `count`
+# of them (None: all of them, only with --until).
+let now = Instant.now();
+let start_time = parse_time(opts.start, now);
+if (start_time.is_err()) {
+    usage_error(start_time.unwrap_err());
+}
+let start = start_time.unwrap();
+var limit = start + HORIZON;
+if (opts.until != "") {
+    match parse_time(opts.until, now) {
+        Ok(at) => { limit = at; },
+        Err(message) => { usage_error(message); },
+    }
+}
+let count: Option[int] = if (opts.count >= 0) { Some(opts.count) } else if (opts.until != "") { None } else { Some(DEFAULT_COUNT) };
+
+# Entries from the operands, then from each file. A bad line is reported
+# and skipped; the others still run.
+var status = EXIT_OK;
+var entries: list[Entry] = [];
+for (k in 0..opts.schedules.len()) {
+    match parse_operand(opts.schedules[k], k + 1) {
+        Ok(e) => { entries.push(e); },
+        Err(reason) => {
+            printErr(i"{$ APP_NAME $}: #{$ k + 1 $}: {$ reason $}");
+            status = EXIT_FAILURE;
+        },
+    }
+}
+for (file in opts.files) {
+    let path = if (file == "-") { "/dev/stdin" } else { file };
+    let label = if (file == "-") { "stdin" } else { file };
+    # Under the self-hosted `loup run` an IoError from readText cannot be
+    # caught: check first.
+    if (!exists(path)) {
+        printErr(i"{$ APP_NAME $}: {$ file $}: No such file or directory");
+        status = EXIT_FAILURE;
+        continue;
+    }
+    if (isDir(path)) {
+        printErr(i"{$ APP_NAME $}: {$ file $}: Is a directory");
+        status = EXIT_FAILURE;
+        continue;
+    }
+    let crontab = read_crontab(readText(path), label, opts.system_crontab);
+    for (note in crontab.notes) {
+        match note {
+            Note.Warning(text) => { printErr(i"{$ APP_NAME $}: {$ text $}"); },
+            Note.Error(text) => {
+                printErr(i"{$ APP_NAME $}: {$ text $}");
+                status = EXIT_FAILURE;
+            },
+        }
+    }
+    for (e in crontab.entries) {
+        entries.push(e);
+    }
+}
+
+# A schedule with no run in the horizon never runs (`0 0 30 2 *`).
+var live: list[Entry] = [];
+for (e in entries) {
+    if (next_run(e.schedule, start, start + HORIZON).is_none()) {
+        printErr(i"{$ APP_NAME $}: {$ origin_label(e.origin) $}: warning: '{$ e.schedule.text $}' never runs");
+    } else {
+        live.push(e);
+    }
+}
+
+func time_text(at: int): string {
+    return if (opts.iso) { format_iso(at) } else { format_human(at) };
+}
+
+# The time of a run, and with -r how long until it.
+func when_text(at: int): string {
+    return if (opts.relative) { time_text(at) + "  " + format_wait(start, at) } else { time_text(at) };
+}
+
+# The source column is as wide as the widest label.
+var width = 0;
+for (e in live) {
+    let label = origin_label(e.origin);
+    if (label.len() > width) {
+        width = label.len();
+    }
+}
+
+# The schedule as written, with what a macro stands for.
+func schedule_words(s: Schedule): string {
+    return match macro_fields(s.text) {
+        Some(fields) => s.text + " (" + fields + ")",
+        None => s.text,
+    };
+}
+
+match opts.mode {
+    Mode.Check => {},
+    Mode.Merge => {
+        let schedules: list[Schedule] = [e.schedule for e in live];
+        let runs = merged_runs(schedules, start, limit, count);
+        # With -r the time column varies in width: pad it to the widest.
+        let whens: list[string] = [when_text(run.0) for run in runs];
+        var when_width = 0;
+        for (w in whens) {
+            if (w.len() > when_width) {
+                when_width = w.len();
+            }
+        }
+        for (k in 0..runs.len()) {
+            let e = live[runs[k].1];
+            println(padRight(whens[k], when_width, " ") + "  " + padRight(origin_label(e.origin), width, " ") + "  " + entry_title(e));
+        }
+    },
+    Mode.Each => {
+        var first = true;
+        for (e in live) {
+            if (!first) {
+                println("");
+            }
+            first = false;
+            let title = if (e.command == "") { schedule_words(e.schedule) } else { schedule_words(e.schedule) + "  " + entry_title(e) };
+            println(origin_label(e.origin) + "  " + title);
+            for (at in runs_of(e.schedule, start, limit, count ?? HORIZON)) {
+                println("  " + when_text(at));
+            }
+        }
+    },
+    Mode.Explain => {
+        var first = true;
+        for (e in live) {
+            if (!first) {
+                println("");
+            }
+            first = false;
+            let title = if (e.command == "") { schedule_words(e.schedule) } else { schedule_words(e.schedule) + "  " + entry_title(e) };
+            println(origin_label(e.origin) + "  " + title);
+            println("    " + describe(e.schedule));
+            match next_run(e.schedule, start, limit) {
+                Some(at) => { println("    next: " + when_text(at)); },
+                None => { println("    next: none before " + time_text(limit)); },
+            }
+        }
+    },
+}
+exit(status);

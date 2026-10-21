@@ -1,0 +1,186 @@
+@mode(host.scripted)
+
+# cronnext's cron fields: the five kinds, the parts a field is made of and
+# the set of values each field allows.
+#
+# Runtime: host.scripted. A module of the script bin/cronnext.lpscr,
+# interpreted with it by `loup run`; tests/field_test.lpscr imports it
+# under Stage0's test runner.
+#
+# Structure: what each kind of field accepts (range, names), parse_part
+# for one list item (a regular expression splits it, a match validates the
+# numbers), expand for the values a list of parts allows, and parse_field
+# for a whole field.
+
+from system.regex import (Regex);
+from system.collections import (rangeFrom);
+
+pub enum FieldKind {
+    Minute,
+    Hour,
+    DayOfMonth,
+    Month,
+    DayOfWeek,
+}
+
+# One item of a field's comma-separated list, with its numbers checked.
+pub enum Part {
+    # `*`
+    Every,
+    # `5`, `mon`
+    Single(value: int),
+    # `1-5`, `mon-fri`
+    Span(low: int, high: int),
+    # `*/15`, `1-30/5`, `5/10` (to the end of the range)
+    Stepped(low: int, high: int, step: int),
+}
+
+pub struct Field {
+    pub kind: FieldKind;
+    pub text: string;
+    pub parts: list[Part];
+    # Every value the field allows; Sunday is 0 even when written 7.
+    pub allowed: set[int];
+    # The same values in ascending order, for jumping to the next one.
+    pub values: list[int];
+    # False when the text starts with `*`. Only restricted day fields take
+    # part in cron's "either day field" rule, so `*/2` counts as `*` there,
+    # as in Vixie cron and cronie.
+    pub restricted: bool;
+}
+
+pub func field_name(kind: FieldKind): string {
+    return match kind {
+        FieldKind.Minute => "minute",
+        FieldKind.Hour => "hour",
+        FieldKind.DayOfMonth => "day-of-month",
+        FieldKind.Month => "month",
+        FieldKind.DayOfWeek => "day-of-week",
+    };
+}
+
+# The smallest and largest value a field may be written with.
+pub func bounds(kind: FieldKind): (int, int) {
+    return match kind {
+        FieldKind.Minute => (0, 59),
+        FieldKind.Hour => (0, 23),
+        FieldKind.DayOfMonth => (1, 31),
+        FieldKind.Month => (1, 12),
+        FieldKind.DayOfWeek => (0, 7),
+    };
+}
+
+pub let MONTH_NAMES: list[string] = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+pub let DAY_NAMES: list[string] = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+
+# A number, or for months and weekdays a three-letter name in any case.
+pub func value_of(kind: FieldKind, token: string): Result[int, string] {
+    let word = token.toLowerCase();
+    if (kind == FieldKind.Month and MONTH_NAMES.contains(word)) {
+        return Ok(MONTH_NAMES.index_of(word) + 1);
+    }
+    if (kind == FieldKind.DayOfWeek and DAY_NAMES.contains(word)) {
+        return Ok(DAY_NAMES.index_of(word));
+    }
+    for (ch in token.chars()) {
+        if (ch < "0" or ch > "9") {
+            return Err(i"'{$ token $}' is not a number or a name");
+        }
+    }
+    if (token.len() > 4) {
+        return Err(i"{$ token $} is out of range");
+    }
+    return Ok(token.toInt());
+}
+
+# `*` or a value or a range, then an optional step. Names are allowed where
+# values are; steps are always numbers.
+let ITEM: Regex = Regex("^(?:(?P<star>\\*)|(?P<low>[0-9A-Za-z]+)(?:-(?P<high>[0-9A-Za-z]+))?)(?:/(?P<step>[0-9]+))?$");
+
+pub func parse_part(kind: FieldKind, item: string): Result[Part, string] {
+    let (least, most) = bounds(kind);
+    let found = match ITEM.findFirst(item) {
+        Some(m) => m,
+        None => { return Err(i"'{$ item $}' is not a value, a range or a step"); },
+    };
+    let step_text = found.groupByName("step") ?? "";
+    let step = if (step_text == "") { 1 } else { step_text.toInt() };
+    if (step_text != "" and (step < 1 or step > most)) {
+        return Err(i"step {$ step_text $} is out of range 1-{$ most $}");
+    }
+    if (found.groupByName("star").is_some()) {
+        if (step_text == "") {
+            return Ok(Part.Every);
+        }
+        return Ok(Part.Stepped(low = least, high = most, step = step));
+    }
+
+    let low = value_of(kind, found.groupByName("low").unwrap())?;
+    let high_text = found.groupByName("high") ?? "";
+    var high = low;
+    if (high_text != "") {
+        high = value_of(kind, high_text)?;
+    } else if (step_text != "") {
+        high = most;
+    }
+    # Each arm binds its own names: in 1.26, when several arms of a match on
+    # a tuple bind the same name, only the last of them gets a value.
+    match (low, high) {
+        (start, _) if (start < least or start > most) => { return Err(i"{$ start $} is out of range {$ least $}-{$ most $}"); },
+        (_, stop) if (stop < least or stop > most) => { return Err(i"{$ stop $} is out of range {$ least $}-{$ most $}"); },
+        (lo, hi) if (lo > hi) => { return Err(i"the range {$ item $} runs backwards"); },
+        _ => {},
+    }
+    if (step_text != "") {
+        return Ok(Part.Stepped(low = low, high = high, step = step));
+    }
+    if (high_text != "") {
+        return Ok(Part.Span(low = low, high = high));
+    }
+    return Ok(Part.Single(value = low));
+}
+
+# The values a list of parts allows, as a set. A day of week of 7 is
+# Sunday, 0.
+pub func expand(kind: FieldKind, parts: list[Part]): set[int] {
+    let (least, most) = bounds(kind);
+    var allowed: set[int] = set[int]();
+    for (part in parts) {
+        let (first, last, step) = match part {
+            Part.Every => (least, most, 1),
+            Part.Single(v) => (v, v, 1),
+            Part.Span(lo, hi) => (lo, hi, 1),
+            Part.Stepped(lo, hi, every) => (lo, hi, every),
+        };
+        for (var v = first; v <= last; v = v + step) {
+            allowed.add(if (kind == FieldKind.DayOfWeek and v == 7) { 0 } else { v });
+        }
+    }
+    return allowed;
+}
+
+# A whole field: a comma-separated list of parts. Errors name the field and
+# its text: "bad hour field '25': 25 is out of range 0-23".
+pub func parse_field(kind: FieldKind, text: string): Result[Field, string] {
+    let (least, most) = bounds(kind);
+    var parts: list[Part] = [];
+    for (item in text.split(",")) {
+        if (item == "") {
+            return Err(i"bad {$ field_name(kind) $} field '{$ text $}': an empty list item");
+        }
+        match parse_part(kind, item) {
+            Ok(part) => { parts.push(part); },
+            Err(reason) => { return Err(i"bad {$ field_name(kind) $} field '{$ text $}': {$ reason $}"); },
+        }
+    }
+    let allowed = expand(kind, parts);
+    let values: list[int] = [v for v in rangeFrom(least, most + 1) if allowed.contains(v)];
+    return Ok(Field(
+        kind = kind,
+        text = text,
+        parts = parts,
+        allowed = allowed,
+        values = values,
+        restricted = !text.startsWith("*"),
+    ));
+}

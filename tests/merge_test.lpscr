@@ -1,0 +1,57 @@
+@mode(host.scripted)
+
+# Unit tests for cronnext's merge (lib/merge.lpscr): the runs of several
+# schedules in one time-ordered list, ties in input order, and the count
+# and limit that end it.
+#
+# Runtime: host.scripted, run by the test runner: `make test` interprets
+# this file with Stage0 (`loup-bootstrap test --no-parallel --file`), one
+# test per `func test_*()`. It imports lib/ with relative imports. It is not
+# part of the program.
+
+from debug.assert import (expectEq);
+from ..lib.clock import (minute_at, format_iso);
+from ..lib.schedule import (Schedule, parse_schedule, HORIZON);
+from ..lib.merge import (merged_runs);
+
+func schedules(texts: list[string]): list[Schedule] {
+    var out: list[Schedule] = [];
+    for (t in texts) {
+        out.push(parse_schedule(t).unwrap());
+    }
+    return out;
+}
+
+# Runs as `HH:MM#index`, for short expectations.
+func shown(runs: list[(int, int)]): string {
+    let parts: list[string] = [format_iso(r.0).slice(11, 16) + "#" + str(r.1) for r in runs];
+    return parts.join(" ");
+}
+
+let START: int = minute_at(2026, 10, 20, 14, 37);
+
+func test_merge_in_time_order(): void {
+    let runs = merged_runs(schedules(["*/20 * * * *", "50 * * * *", "0 15 * * *"]), START, START + HORIZON, Some(6));
+    expectEq(shown(runs), "14:40#0 14:50#1 15:00#0 15:00#2 15:20#0 15:40#0", "merged; the 15:00 tie in input order");
+}
+
+func test_ties_follow_input_order(): void {
+    let runs = merged_runs(schedules(["0 * * * *", "@hourly", "0 */1 * * *"]), START, START + HORIZON, Some(3));
+    expectEq(shown(runs), "15:00#0 15:00#1 15:00#2", "same minute, three schedules");
+}
+
+func test_limit_and_count(): void {
+    let limit = minute_at(2026, 10, 20, 16, 0);
+    let all = merged_runs(schedules(["*/30 * * * *", "45 * * * *"]), START, limit, None);
+    expectEq(shown(all), "14:45#1 15:00#0 15:30#0 15:45#1", "everything before 16:00");
+    expectEq(merged_runs(schedules(["* * * * *"]), START, START + HORIZON, Some(0)).len(), 0, "a count of 0");
+    let none: list[Schedule] = [];
+    expectEq(merged_runs(none, START, START + HORIZON, Some(5)).len(), 0, "no schedules");
+}
+
+func test_a_schedule_that_ends(): void {
+    let limit = minute_at(2027, 1, 1, 0, 0);
+    let runs = merged_runs(schedules(["0 0 1 1 *", "0 0 25 12 *"]), START, limit + 1, None);
+    expectEq(runs.len(), 2, "Christmas, then New Year's Day at the limit");
+    expectEq(runs[0].1, 1, "Christmas first");
+}

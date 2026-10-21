@@ -1,0 +1,22 @@
+# Tasks: cronnext
+
+- [x] 1. Layout: `bin/cronnext.lpscr` entry script, `lib/` modules with relative imports, manifest entry and test pattern for scripts, Makefile without a build target, CI
+  - _Requirements: all_
+- [x] 2. Fields: values, names, ranges, steps, lists, Sunday as 7, error messages naming the field
+  - _Requirements: 1.1, 1.2, 1.3, 1.6_
+- [x] 3. Schedules: macros, `@reboot`, the day-of-month/day-of-week rule
+  - _Requirements: 1.4, 1.5, 1.7_
+- [x] 4. The next-run search with jumps by month, day, hour and minute; the never-runs horizon
+  - _Requirements: 3.1, 3.7_
+- [x] 5. Crontab files and operands: comments, settings, `TZ`/`CRON_TZ`, system crontabs, notes in line order, missing files
+  - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6_
+- [x] 6. Times: `--from`, `--until`, `now`, `@SECONDS`, rounding up; human, ISO and relative output
+  - _Requirements: 3.3, 3.4, 3.5_
+- [x] 7. Merged list with a priority queue, ties in input order; `-l` per schedule
+  - _Requirements: 3.1, 3.2, 3.6_
+- [x] 8. Explanations in English; `-c` check mode
+  - _Requirements: 4.1, 4.2_
+- [x] 9. Options, usage errors, help, version, exit statuses
+  - _Requirements: 5.1, 5.2, 5.3, 5.4_
+- [x] 10. Unit tests (checked against a brute-force reference), fixtures, end-to-end tests with `loup run`
+  - _Requirements: all_

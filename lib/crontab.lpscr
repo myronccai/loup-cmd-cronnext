@@ -1,0 +1,172 @@
+@mode(host.scripted)
+
+# cronnext's inputs: crontab lines (from files or the command line) turned
+# into entries that remember where they came from.
+#
+# Runtime: host.scripted. A module of the script bin/cronnext.lpscr,
+# interpreted with it by `loup run`; tests/crontab_test.lpscr imports it
+# under Stage0's test runner.
+#
+# Structure: Origin and Entry, the regular expressions for the two kinds of
+# lines, classify() for one crontab line, read_crontab() for a whole file
+# and parse_operand() for a schedule typed on the command line.
+
+from system.regex import (Regex);
+from .schedule import (Schedule, parse_schedule);
+
+# Where an entry came from: the n-th operand, or a line of a file.
+pub enum Origin {
+    Operand(position: int),
+    FileLine(path: string, line: int),
+}
+
+pub func origin_label(o: Origin): string {
+    match o {
+        Origin.Operand(position) => { return "#" + str(position); },
+        Origin.FileLine(path, line) => { return path + ":" + str(line); },
+    }
+}
+
+pub struct Entry {
+    pub origin: Origin;
+    pub schedule: Schedule;
+    # "" for a bare schedule given on the command line.
+    pub command: string;
+    # The user field of a system crontab (-s), else "".
+    pub user: string;
+}
+
+# What the program prints for an entry: its command, or its schedule when
+# it has none. A system crontab's user comes first, as cron logs it:
+# `(root) run-parts /etc/cron.daily`.
+pub func entry_title(e: Entry): string {
+    if (e.command == "") {
+        return e.schedule.text;
+    }
+    return if (e.user == "") { e.command } else { "(" + e.user + ") " + e.command };
+}
+
+# A crontab line, classified.
+pub enum Line {
+    Blank,
+    Comment,
+    Setting(name: string, value: string),
+    Reboot(command: string),
+    Job(schedule: Schedule, user: string, command: string),
+    Invalid(reason: string),
+}
+
+# `NAME=value`, `NAME = "value"`: environment settings in a crontab.
+let SETTING: Regex = Regex("^[ \\t]*(?P<name>[A-Za-z_][A-Za-z0-9_]*)[ \\t]*=[ \\t]*(?P<value>.*)$");
+
+# A macro or five fields, then the rest of the line.
+let JOB: Regex = Regex("^[ \\t]*(?P<when>@[A-Za-z]+|[^ \\t]+[ \\t]+[^ \\t]+[ \\t]+[^ \\t]+[ \\t]+[^ \\t]+[ \\t]+[^ \\t]+)(?:[ \\t]+(?P<rest>.*))?$");
+
+# The user field of a system crontab, then the command.
+let USER_COMMAND: Regex = Regex("^(?P<user>[^ \\t]+)(?:[ \\t]+(?P<command>.*))?$");
+
+pub func classify(text: string, system_crontab: bool): Line {
+    let trimmed = text.trim();
+    if (trimmed == "") {
+        return Line.Blank;
+    }
+    if (trimmed.startsWith("#")) {
+        return Line.Comment;
+    }
+    match SETTING.findFirst(text) {
+        Some(m) => {
+            return Line.Setting(name = m.groupByName("name").unwrap(), value = (m.groupByName("value") ?? "").trim());
+        },
+        None => {},
+    }
+    let found = match JOB.findFirst(trimmed) {
+        Some(m) => m,
+        None => {
+            # Too few words for a job: let the schedule parser say what is
+            # missing.
+            return match parse_schedule(trimmed) {
+                Ok(_) => Line.Invalid("missing command"),
+                Err(reason) => Line.Invalid(reason),
+            };
+        },
+    };
+    let when = found.groupByName("when").unwrap();
+    var rest = (found.groupByName("rest") ?? "").trim();
+    if (when.toLowerCase() == "@reboot") {
+        return Line.Reboot(command = rest);
+    }
+    let schedule = match parse_schedule(when) {
+        Ok(s) => s,
+        Err(reason) => { return Line.Invalid(reason); },
+    };
+    var user = "";
+    if (system_crontab) {
+        let split = match USER_COMMAND.findFirst(rest) {
+            Some(m) => m,
+            None => { return Line.Invalid("missing user"); },
+        };
+        user = split.groupByName("user").unwrap();
+        rest = (split.groupByName("command") ?? "").trim();
+    }
+    if (rest == "") {
+        return Line.Invalid("missing command");
+    }
+    return Line.Job(schedule = schedule, user = user, command = rest);
+}
+
+# Something to tell the user about a crontab line, already prefixed with
+# `PATH:LINE: `. Errors make the exit status 1; warnings do not.
+pub enum Note {
+    Warning(text: string),
+    Error(text: string),
+}
+
+# The entries of a crontab and the notes on its lines, in line order.
+pub struct Crontab {
+    pub entries: list[Entry];
+    pub notes: list[Note];
+}
+
+pub func read_crontab(text: string, path: string, system_crontab: bool): Crontab {
+    var entries: list[Entry] = [];
+    var notes: list[Note] = [];
+    let lines = text.split("\n");
+    for (k in 0..lines.len()) {
+        let place = path + ":" + str(k + 1);
+        match classify(lines[k], system_crontab) {
+            Line.Job(schedule, user, command) => {
+                entries.push(Entry(origin = Origin.FileLine(path, k + 1), schedule = schedule, command = command, user = user));
+            },
+            Line.Setting(name, _) if (name == "TZ" or name == "CRON_TZ") => {
+                notes.push(Note.Warning(place + ": warning: " + name + " is ignored; times are UTC"));
+            },
+            Line.Reboot(_) => {
+                notes.push(Note.Warning(place + ": warning: @reboot runs only when cron starts"));
+            },
+            Line.Invalid(reason) => {
+                notes.push(Note.Error(place + ": " + reason));
+            },
+            _ => {},
+        }
+    }
+    return Crontab(entries = entries, notes = notes);
+}
+
+# A schedule typed on the command line, optionally followed by a command.
+pub func parse_operand(text: string, position: int): Result[Entry, string] {
+    let trimmed = text.trim();
+    if (trimmed == "") {
+        return Err("empty schedule");
+    }
+    var when = trimmed;
+    var command = "";
+    match JOB.findFirst(trimmed) {
+        Some(m) => {
+            when = m.groupByName("when").unwrap();
+            command = (m.groupByName("rest") ?? "").trim();
+        },
+        None => {},
+    }
+    let schedule = parse_schedule(when)?;
+    return Ok(Entry(origin = Origin.Operand(position), schedule = schedule, command = command, user = ""));
+}

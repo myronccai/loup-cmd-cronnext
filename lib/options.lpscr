@@ -1,0 +1,177 @@
+@mode(host.scripted)
+
+# cronnext's command line: the Options object and parse_args.
+#
+# Grammar: cronnext [OPTION]... [SCHEDULE]...
+#   Short options may be combined (`-lr`) and take their value attached or
+#   as the next word (`-n3`, `-n 3`); long options take `--name VALUE` or
+#   `--name=VALUE`. Options may follow the schedules; `--` ends the options.
+#
+# Runtime: host.scripted. A module of the script bin/cronnext.lpscr,
+# interpreted with it by `loup run`; tests/options_test.lpscr imports it
+# under Stage0's test runner.
+
+# What to print.
+pub enum Mode {
+    # The next runs of all schedules in one list (the default).
+    Merge,
+    # The next runs of each schedule under its own heading (-l).
+    Each,
+    # Each schedule in words (-e).
+    Explain,
+    # Nothing but the errors (-c).
+    Check,
+}
+
+pub func mode_option(mode: Mode): string {
+    return match mode {
+        Mode.Merge => "",
+        Mode.Each => "--each",
+        Mode.Explain => "--explain",
+        Mode.Check => "--check",
+    };
+}
+
+pub class Options {
+    pub var help: bool = false;
+    pub var version: bool = false;
+    pub var files: list[string] = [];
+    pub var system_crontab: bool = false;
+    # -1 when -n is not given.
+    pub var count: int = -1;
+    pub var start: string = "now";
+    pub var until: string = "";
+    pub var mode: Mode = Mode.Merge;
+    pub var iso: bool = false;
+    pub var relative: bool = false;
+    pub var schedules: list[string] = [];
+}
+
+pub const DEFAULT_COUNT: int = 10;
+
+let SHORT_OPTIONS: dict[string, string] = {
+    "f": "--file",
+    "s": "--system",
+    "n": "--count",
+    "l": "--each",
+    "e": "--explain",
+    "c": "--check",
+    "r": "--relative",
+    "h": "--help",
+    "V": "--version",
+};
+let WITH_VALUE: set[string] = {"--file", "--count", "--from", "--until"};
+let FLAGS: set[string] = {"--system", "--each", "--explain", "--check", "--iso", "--relative", "--help", "--version"};
+
+# A count: digits only, at most nine of them.
+pub func parse_count(text: string): Option[int] {
+    if (text == "" or text.len() > 9) {
+        return None;
+    }
+    for (ch in text.chars()) {
+        if (ch < "0" or ch > "9") {
+            return None;
+        }
+    }
+    return Some(text.toInt());
+}
+
+# Records one option on `o`. The mode options exclude each other.
+safe func apply_option(edits o: Options, name: string, value: string): Result[bool, string] {
+    var mode = Mode.Merge;
+    match name {
+        "--file" => { o.files.push(value); },
+        "--system" => { o.system_crontab = true; },
+        "--count" => {
+            match parse_count(value) {
+                Some(n) => { o.count = n; },
+                None => { return Err(i"invalid count '{$ value $}'"); },
+            }
+        },
+        "--from" => { o.start = value; },
+        "--until" => { o.until = value; },
+        "--each" => { mode = Mode.Each; },
+        "--explain" => { mode = Mode.Explain; },
+        "--check" => { mode = Mode.Check; },
+        "--iso" => { o.iso = true; },
+        "--relative" => { o.relative = true; },
+        "--help" => { o.help = true; },
+        "--version" => { o.version = true; },
+        _ => { return Err(i"unrecognized option '{$ name $}'"); },
+    }
+    let chosen = mode_option(mode);
+    let current = mode_option(o.mode);
+    if (chosen != "") {
+        if (current != "" and current != chosen) {
+            return Err(i"{$ current $} and {$ chosen $} cannot be combined");
+        }
+        o.mode = mode;
+    }
+    return Ok(true);
+}
+
+pub safe func parse_args(argv: list[string]): Result[Options, string] {
+    let o = Options();
+    var only_operands = false;
+    var i = 0;
+    while (i < argv.len()) {
+        let arg = argv[i];
+        i += 1;
+        if (only_operands or arg == "-" or !arg.startsWith("-")) {
+            o.schedules.push(arg);
+            continue;
+        }
+        if (arg == "--") {
+            only_operands = true;
+            continue;
+        }
+        if (arg.startsWith("--")) {
+            let eq = arg.index_of("=");
+            let name = if (eq >= 0) { arg.slice(0, eq) } else { arg };
+            var value = "";
+            if (WITH_VALUE.contains(name)) {
+                if (eq >= 0) {
+                    value = arg.slice(eq + 1);
+                } else if (i < argv.len()) {
+                    value = argv[i];
+                    i += 1;
+                } else {
+                    return Err(i"option '{$ name $}' requires an argument");
+                }
+            } else if (!FLAGS.contains(name)) {
+                return Err(i"unrecognized option '{$ arg $}'");
+            } else if (eq >= 0) {
+                return Err(i"option '{$ name $}' doesn't allow an argument");
+            }
+            apply_option(edits: o, name, value)?;
+            continue;
+        }
+        # A cluster of short options: `-lr`, `-n3`, `-f crontab`.
+        var j = 1;
+        while (j < arg.len()) {
+            let letter = arg.slice(j, j + 1);
+            j += 1;
+            let name = match SHORT_OPTIONS.get(letter) {
+                Some(long) => long,
+                None => { return Err(i"invalid option -- '{$ letter $}'"); },
+            };
+            var value = "";
+            if (WITH_VALUE.contains(name)) {
+                if (j < arg.len()) {
+                    value = arg.slice(j);
+                    j = arg.len();
+                } else if (i < argv.len()) {
+                    value = argv[i];
+                    i += 1;
+                } else {
+                    return Err(i"option requires an argument -- '{$ letter $}'");
+                }
+            }
+            apply_option(edits: o, name, value)?;
+        }
+    }
+    if (!o.help and !o.version and o.schedules.len() == 0 and o.files.len() == 0) {
+        return Err("no schedule given (give SCHEDULE operands or -f FILE)");
+    }
+    return Ok(o);
+}

@@ -1,0 +1,13 @@
+# m h  dom mon dow   command
+SHELL=/bin/sh
+MAILTO=ops@example.org
+CRON_TZ=Europe/Lisbon
+
+*/20 9-17 * * mon-fri   /opt/app/bin/sync --quiet
+0 3 * * *               /opt/app/bin/backup >> /var/log/backup.log 2>&1
+30 4 1,15 * 5           /opt/app/bin/report --monthly
+@hourly                 /opt/app/bin/rotate-logs
+@reboot                 /opt/app/bin/start
+0 0 30 2 *              /opt/app/bin/never
+15 25 * * *             /opt/app/bin/typo
+0 12 * * 1-5

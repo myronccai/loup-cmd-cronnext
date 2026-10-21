@@ -1,0 +1,16 @@
+@mode(host.scripted)
+
+# cronnext's identity and exit statuses. Keep APP_VERSION in step with
+# `version` in package.lppkg.
+#
+# Runtime: host.scripted. A module of the script bin/cronnext.lpscr,
+# interpreted with it by `loup run`; lib/usage.lpscr imports it too.
+
+pub const APP_NAME: string = "cronnext";
+pub const APP_VERSION: string = "0.1.0";
+pub const APP_SUMMARY: string = "Print the next run times of cron schedules and crontab files.";
+
+# Exit statuses.
+pub const EXIT_OK: int = 0;
+pub const EXIT_FAILURE: int = 1;
+pub const EXIT_USAGE: int = 2;

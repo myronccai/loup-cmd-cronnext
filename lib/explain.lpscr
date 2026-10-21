@@ -1,0 +1,219 @@
+@mode(host.scripted)
+
+# cronnext's explanations: a schedule in English, for -e.
+#
+# Runtime: host.scripted. A module of the script bin/cronnext.lpscr,
+# interpreted with it by `loup run`; tests/explain_test.lpscr imports it
+# under Stage0's test runner.
+#
+# Structure: words for values and parts, the Shape of a field (the few
+# forms that read differently in English), then one phrase each for the
+# time of day, the days and the months, joined into a sentence:
+# "every 15 minutes between 09:00 and 17:59, on Monday through Friday".
+
+from .field import (FieldKind, Part, Field, bounds);
+from .schedule import (Schedule);
+from .clock import (clock_text);
+
+let MONTH_WORDS: list[string] = ["January", "February", "March", "April", "May", "June", "July",
+    "August", "September", "October", "November", "December"];
+let DAY_WORDS: list[string] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+# "a", "a and b", "a, b and c".
+pub func join_words(words: list[string]): string {
+    return match words.len() {
+        0 => "",
+        1 => words[0],
+        n => words.slice(0, n - 1).join(", ") + " and " + words[n - 1],
+    };
+}
+
+# 1st, 2nd, 3rd, 4th ... 11th, 12th, 13th ... 21st, 22nd.
+pub func ordinal(n: int): string {
+    let suffix = match (n % 10, n % 100) {
+        (_, teen) if (teen >= 11 and teen <= 13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    return str(n) + suffix;
+}
+
+func value_word(kind: FieldKind, v: int): string {
+    return match kind {
+        FieldKind.Month => MONTH_WORDS[v - 1],
+        FieldKind.DayOfWeek => DAY_WORDS[v % 7],
+        _ => str(v),
+    };
+}
+
+func unit_word(kind: FieldKind): string {
+    return match kind {
+        FieldKind.Minute => "minute",
+        FieldKind.Hour => "hour",
+        FieldKind.DayOfMonth => "day of the month",
+        FieldKind.Month => "month",
+        FieldKind.DayOfWeek => "day of the week",
+    };
+}
+
+# One part of a field in words: "Monday through Friday", "every 2nd hour
+# from 0 through 20".
+pub func part_words(kind: FieldKind, part: Part): string {
+    match part {
+        Part.Every => { return "every " + unit_word(kind); },
+        Part.Single(v) => { return value_word(kind, v); },
+        Part.Span(lo, hi) => { return value_word(kind, lo) + " through " + value_word(kind, hi); },
+        Part.Stepped(lo, hi, step) if (covers_range(kind, lo, hi)) => {
+            return "every " + ordinal(step) + " " + unit_word(kind);
+        },
+        Part.Stepped(lo, hi, step) => {
+            return "every " + ordinal(step) + " " + unit_word(kind) + " from " + value_word(kind, lo) + " through " + value_word(kind, hi);
+        },
+    }
+}
+
+# A step over the whole range (`*/2`, or `0-6/2` for weekdays, where 7 is
+# Sunday again).
+func covers_range(kind: FieldKind, lo: int, hi: int): bool {
+    let (least, most) = bounds(kind);
+    return lo == least and (hi == most or (kind == FieldKind.DayOfWeek and hi == 6));
+}
+
+func list_words(f: Field): string {
+    let words: list[string] = [part_words(f.kind, p) for p in f.parts];
+    return join_words(words);
+}
+
+# The forms of a field that read differently in English.
+enum Shape {
+    # `*`
+    Any,
+    # only single values: `0`, `9,17`
+    At(values: list[int]),
+    # one step over the whole range: `*/15`
+    Every(step: int),
+    # ranges, partial steps, mixtures
+    Mixed,
+}
+
+func shape_of(f: Field): Shape {
+    var singles: list[int] = [];
+    for (p in f.parts) {
+        match p {
+            Part.Single(v) => { singles.push(v); },
+            _ => {},
+        }
+    }
+    if (singles.len() == f.parts.len()) {
+        return Shape.At(f.values);
+    }
+    if (f.parts.len() > 1) {
+        return Shape.Mixed;
+    }
+    return match f.parts[0] {
+        Part.Every => Shape.Any,
+        Part.Stepped(lo, hi, step) if (covers_range(f.kind, lo, hi)) => Shape.Every(step),
+        _ => Shape.Mixed,
+    };
+}
+
+# Which hours, as a phrase that follows the minutes ("" for every hour).
+func hour_scope(f: Field): string {
+    match shape_of(f) {
+        Shape.Any => { return ""; },
+        Shape.Every(step) => { return "past every " + ordinal(step) + " hour"; },
+        Shape.At(hours) if (hours.len() == 1) => {
+            return "between " + clock_text(hours[0], 0) + " and " + clock_text(hours[0], 59);
+        },
+        Shape.At(hours) => {
+            let shown: list[string] = [str(h) for h in hours];
+            return "during hours " + join_words(shown);
+        },
+        Shape.Mixed => {},
+    }
+    if (f.parts.len() == 1) {
+        match f.parts[0] {
+            Part.Span(lo, hi) => { return "between " + clock_text(lo, 0) + " and " + clock_text(hi, 59); },
+            Part.Stepped(lo, hi, step) => {
+                return "past every " + ordinal(step) + " hour from " + clock_text(lo, 0) + " through " + clock_text(hi, 59);
+            },
+            _ => {},
+        }
+    }
+    return "during hours " + list_words(f);
+}
+
+func with_scope(phrase: string, scope: string): string {
+    return if (scope == "") { phrase } else { phrase + " " + scope };
+}
+
+# The time of day: "at 09:30", "every 15 minutes between 09:00 and 17:59".
+pub func time_words(s: Schedule): string {
+    let scope = hour_scope(s.hour);
+    match shape_of(s.minute) {
+        Shape.At(minutes) if (minutes.len() == 1) => {
+            let m = minutes[0];
+            return match shape_of(s.hour) {
+                Shape.At(hours) => "at " + join_words([clock_text(h, m) for h in hours]),
+                Shape.Any => "at minute " + str(m) + " of every hour",
+                _ => with_scope("at minute " + str(m), scope),
+            };
+        },
+        Shape.At(minutes) => {
+            let shown: list[string] = [str(m) for m in minutes];
+            return with_scope("at minutes " + join_words(shown), if (scope == "") { "of every hour" } else { scope });
+        },
+        Shape.Any => { return with_scope("every minute", scope); },
+        Shape.Every(step) => { return with_scope("every " + str(step) + " minutes", scope); },
+        Shape.Mixed => {
+            return with_scope("at minutes " + list_words(s.minute), if (scope == "") { "of every hour" } else { scope });
+        },
+    }
+}
+
+func day_of_month_words(f: Field): string {
+    return match shape_of(f) {
+        Shape.Any => "",
+        Shape.At(days) if (days.len() == 1) => "on day " + str(days[0]) + " of the month",
+        Shape.At(days) => "on days " + list_words(f) + " of the month",
+        Shape.Every(step) => "on every " + ordinal(step) + " day of the month",
+        Shape.Mixed => "on days " + list_words(f) + " of the month",
+    };
+}
+
+func weekday_words(f: Field): string {
+    return match shape_of(f) {
+        Shape.Any => "",
+        _ => "on " + list_words(f),
+    };
+}
+
+# The days, with cron's rule: "on day 1 of the month or on Friday" when
+# both day fields are restricted.
+pub func day_words(s: Schedule): string {
+    let by_date = day_of_month_words(s.day);
+    let by_weekday = weekday_words(s.weekday);
+    match (s.day.restricted, s.weekday.restricted, by_date == "", by_weekday == "") {
+        (true, true, _, _) => { return by_date + " or " + by_weekday; },
+        (_, _, true, _) => { return by_weekday; },
+        (_, _, _, true) => { return by_date; },
+        _ => { return by_date + ", if that day is also " + list_words(s.weekday); },
+    }
+}
+
+pub func month_words(f: Field): string {
+    return match shape_of(f) {
+        Shape.Any => "",
+        Shape.Every(step) => "in every " + ordinal(step) + " month",
+        _ => "in " + list_words(f),
+    };
+}
+
+# The whole schedule in one sentence.
+pub func describe(s: Schedule): string {
+    let pieces: list[string] = [time_words(s), day_words(s), month_words(s.month)];
+    let kept: list[string] = [p for p in pieces if p != ""];
+    return kept.join(", ");
+}

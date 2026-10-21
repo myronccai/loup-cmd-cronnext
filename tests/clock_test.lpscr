@@ -1,0 +1,80 @@
+@mode(host.scripted)
+
+# Unit tests for cronnext's clock (lib/clock.lpscr): minutes and calendar
+# fields, the starts of hours, days and months, parsing times and printing
+# them.
+#
+# Runtime: host.scripted, run by the test runner: `make test` interprets
+# this file with Stage0 (`loup-bootstrap test --no-parallel --file`), one
+# test per `func test_*()`. It imports lib/ with relative imports. It is not
+# part of the program.
+
+from debug.assert import (expect, expectEq);
+from core.time import (Instant);
+from ..lib.clock import (floor_div, civil, minute_at, start_of_next_day, start_of_next_hour, start_of_next_month,
+    minute_from, parse_time, format_human, format_iso, format_wait);
+
+# 2026-10-20T14:37:20Z, a Tuesday.
+func fixed_now(): Instant {
+    return Instant.fromIso("2026-10-20T14:37:20Z").unwrap();
+}
+
+func parsed(text: string): string {
+    return match parse_time(text, fixed_now()) {
+        Ok(at) => format_iso(at),
+        Err(message) => message,
+    };
+}
+
+func test_floor_div(): void {
+    expectEq(floor_div(7, 2), 3, "positive");
+    expectEq(floor_div(-1, 1440), -1, "a minute before 1970 is day -1");
+    expectEq(floor_div(-1440, 1440), -1, "exact");
+}
+
+func test_civil(): void {
+    let c = civil(minute_at(2026, 10, 20, 14, 37));
+    expectEq(str(c.year) + "-" + str(c.month) + "-" + str(c.day) + " " + str(c.hour) + ":" + str(c.minute), "2026-10-20 14:37", "fields");
+    expectEq(c.weekday, 2, "Tuesday, counting from Sunday = 0");
+    expectEq(civil(minute_at(2026, 10, 25, 0, 0)).weekday, 0, "Sunday");
+    expectEq(civil(0).weekday, 4, "1970-01-01 was a Thursday");
+    expectEq(civil(-1).year, 1969, "before 1970");
+}
+
+func test_starts(): void {
+    let at = minute_at(2026, 12, 31, 23, 15);
+    expectEq(format_iso(start_of_next_hour(at)), "2027-01-01T00:00:00Z", "hour");
+    expectEq(format_iso(start_of_next_day(at)), "2027-01-01T00:00:00Z", "day");
+    expectEq(format_iso(start_of_next_month(civil(at))), "2027-01-01T00:00:00Z", "December to January");
+    expectEq(format_iso(start_of_next_month(civil(minute_at(2028, 2, 10, 5, 0)))), "2028-03-01T00:00:00Z", "February");
+}
+
+func test_minute_from_rounds_up(): void {
+    expectEq(format_iso(minute_from(fixed_now())), "2026-10-20T14:38:00Z", "seconds round up");
+    expectEq(format_iso(minute_from(Instant.fromIso("2026-10-20T14:37:00Z").unwrap())), "2026-10-20T14:37:00Z", "a whole minute stays");
+}
+
+func test_parse_time(): void {
+    expectEq(parsed("now"), "2026-10-20T14:38:00Z", "now");
+    expectEq(parsed("2026-11-01"), "2026-11-01T00:00:00Z", "a date is midnight");
+    expectEq(parsed("2026-11-01 08:30"), "2026-11-01T08:30:00Z", "space");
+    expectEq(parsed("2026-11-01T08:30:15Z"), "2026-11-01T08:31:00Z", "seconds and Z");
+    expectEq(parsed("@1800000000"), "2027-01-15T08:00:00Z", "seconds since 1970");
+}
+
+func test_parse_time_errors(): void {
+    expectEq(parsed("tomorrow"), "invalid time 'tomorrow' (use YYYY-MM-DD[THH:MM[:SS]], @SECONDS or now)", "words");
+    expectEq(parsed("2026-02-30"), "invalid time '2026-02-30': invalid day: 30 for 2026-02", "no such day");
+    expectEq(parsed("2026-10-20T25:00"), "invalid time '2026-10-20T25:00': invalid hour: 25", "no such hour");
+    expectEq(parsed("2026-10-20T10:00+02:00"), "invalid time '2026-10-20T10:00+02:00': only UTC times are supported", "offsets");
+}
+
+func test_formats(): void {
+    let at = minute_at(2026, 10, 20, 9, 5);
+    expectEq(format_human(at), "Tue 2026-10-20 09:05", "human");
+    expectEq(format_iso(at), "2026-10-20T09:05:00Z", "ISO");
+    expectEq(format_wait(at, at), "now", "no wait");
+    expectEq(format_wait(at, at + 45), "in 45m", "minutes");
+    expectEq(format_wait(at, at + 60), "in 1h", "an hour");
+    expectEq(format_wait(at, at + 3 * 1440 + 125), "in 3d 2h 5m", "days");
+}

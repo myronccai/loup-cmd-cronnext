@@ -1,0 +1,84 @@
+@mode(host.scripted)
+
+# Unit tests for cronnext's inputs (lib/crontab.lpscr): each kind of
+# crontab line, system crontabs, whole files with their notes, and
+# schedules typed on the command line.
+#
+# Runtime: host.scripted, run by the test runner: `make test` interprets
+# this file with Stage0 (`loup-bootstrap test --no-parallel --file`), one
+# test per `func test_*()`. It imports lib/ with relative imports. It is not
+# part of the program.
+
+from debug.assert import (expect, expectEq);
+from ..lib.crontab import (Origin, Entry, Line, Note, origin_label, entry_title, classify, read_crontab, parse_operand);
+
+# A line's kind in a word, with its payload.
+func kind(text: string, system_crontab: bool): string {
+    match classify(text, system_crontab) {
+        Line.Blank => { return "blank"; },
+        Line.Comment => { return "comment"; },
+        Line.Setting(name, value) => { return "setting " + name + "=" + value; },
+        Line.Reboot(command) => { return "reboot " + command; },
+        Line.Job(schedule, user, command) => { return "job [" + schedule.text + "] [" + user + "] [" + command + "]"; },
+        Line.Invalid(reason) => { return "invalid: " + reason; },
+    }
+}
+
+func test_classify(): void {
+    expectEq(kind("   ", false), "blank", "blank");
+    expectEq(kind("  # m h dom mon dow", false), "comment", "comment");
+    expectEq(kind("MAILTO = \"ops@example.org\" ", false), "setting MAILTO=\"ops@example.org\"", "setting");
+    expectEq(kind("@reboot /usr/bin/start --now", false), "reboot /usr/bin/start --now", "reboot");
+    expectEq(kind("*/5  * * * *\tcheck.sh  -q", false), "job [*/5 * * * *] [] [check.sh  -q]", "spacing kept in the command only");
+    expectEq(kind("@Daily backup", false), "job [@Daily] [] [backup]", "macro");
+}
+
+func test_invalid_lines(): void {
+    expectEq(kind("0 3 * * *", false), "invalid: missing command", "no command");
+    expectEq(kind("0 3 * *", false), "invalid: expected 5 fields, found 4 in '0 3 * *'", "four fields");
+    expectEq(kind("0 3 * * backup.sh", false), "invalid: bad day-of-week field 'backup.sh': 'backup.sh' is not a value, a range or a step", "a missing field shows as a bad one");
+    expectEq(kind("61 * * * * x", false), "invalid: bad minute field '61': 61 is out of range 0-59", "bad field");
+    expectEq(kind("@often x", false), "invalid: unknown macro '@often'", "unknown macro");
+}
+
+func test_system_crontab(): void {
+    expectEq(kind("17 * * * *  root  cd / && run-parts /etc/cron.hourly", true), "job [17 * * * *] [root] [cd / && run-parts /etc/cron.hourly]", "user field");
+    expectEq(kind("@daily nobody /bin/true", true), "job [@daily] [nobody] [/bin/true]", "macro and user");
+    expectEq(kind("17 * * * *  root", true), "invalid: missing command", "user but no command");
+}
+
+func test_read_crontab(): void {
+    let text = "# jobs\nTZ=Europe/Lisbon\n0 3 * * * backup\n\n@reboot start\n99 * * * * oops\n@hourly rotate\n";
+    let tab = read_crontab(text, "jobs", false);
+    expectEq(tab.entries.len(), 2, "two jobs");
+    expectEq(origin_label(tab.entries[0].origin), "jobs:3", "line numbers");
+    expectEq(entry_title(tab.entries[1]), "rotate", "command");
+    var shown: list[string] = [];
+    for (note in tab.notes) {
+        match note {
+            Note.Warning(text) => { shown.push("W " + text); },
+            Note.Error(text) => { shown.push("E " + text); },
+        }
+    }
+    expectEq(shown.join(" | "), "W jobs:2: warning: TZ is ignored; times are UTC | W jobs:5: warning: @reboot runs only when cron starts | E jobs:6: bad minute field '99': 99 is out of range 0-59", "notes in line order");
+}
+
+func test_operands(): void {
+    let bare = parse_operand(" */10 * * * * ", 1).unwrap();
+    expectEq(origin_label(bare.origin), "#1", "operand label");
+    expectEq(entry_title(bare), "*/10 * * * *", "no command: the schedule");
+    let with_command = parse_operand("0 6 * * mon wake up", 2).unwrap();
+    expectEq(with_command.schedule.text, "0 6 * * mon", "schedule");
+    expectEq(entry_title(with_command), "wake up", "command");
+    expectEq(parse_operand("@weekly", 3).unwrap().schedule.text, "@weekly", "macro alone");
+    expectEq(parse_operand("0 0 * *", 4).unwrap_err(), "expected 5 fields, found 4 in '0 0 * *'", "too short");
+    expectEq(parse_operand("@reboot", 5).unwrap_err(), "@reboot runs only when cron starts", "reboot");
+    expectEq(parse_operand("  ", 6).unwrap_err(), "empty schedule", "empty");
+}
+
+func test_titles_and_labels(): void {
+    let e = read_crontab("1 2 3 4 5 root job", "/etc/crontab", true).entries[0];
+    expectEq(entry_title(e), "(root) job", "user first, as cron logs it");
+    expectEq(origin_label(Origin.FileLine("stdin", 7)), "stdin:7", "file line");
+    expectEq(origin_label(Origin.Operand(12)), "#12", "operand");
+}

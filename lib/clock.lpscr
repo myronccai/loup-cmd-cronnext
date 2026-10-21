@@ -1,0 +1,165 @@
+@mode(host.scripted)
+
+# cronnext's clock: minutes since 1970 (UTC), the calendar fields cron
+# looks at, parsing --from/--until and printing times.
+#
+# Runtime: host.scripted. A module of the script bin/cronnext.lpscr,
+# interpreted with it by `loup run`; tests/clock_test.lpscr imports it
+# under Stage0's test runner.
+#
+# Cron works in whole minutes, so a moment is an int: minutes since
+# 1970-01-01T00:00Z. core.datetime turns day numbers into dates and
+# weekdays; core.time's Instant parses and prints ISO 8601 and measures
+# the wait until a run. Everything is UTC: core.datetime has no local zone
+# in Loup 1.26.
+
+from core.datetime import (civilFromDays, daysFromCivil, weekdayFromDays, Date);
+from core.time import (Instant, Duration);
+from core.string_utils import (padLeft);
+from system.regex import (Regex);
+
+pub const MINUTES_PER_HOUR: int = 60;
+pub const MINUTES_PER_DAY: int = 1_440;
+const MILLIS_PER_MINUTE: int = 60_000;
+
+# Floor division: -1 minute is in day -1, not day 0.
+pub func floor_div(a: int, b: int): int {
+    let q = a / b;
+    return if (a % b != 0 and a < 0) { q - 1 } else { q };
+}
+
+# The calendar fields of a minute, as cron sees them.
+pub struct Civil {
+    pub year: int;
+    pub month: int;
+    pub day: int;
+    pub hour: int;
+    pub minute: int;
+    # 0 is Sunday, as in cron.
+    pub weekday: int;
+}
+
+pub func civil(at: int): Civil {
+    let days = floor_div(at, MINUTES_PER_DAY);
+    let ymd = civilFromDays(days);
+    let rest = at - days * MINUTES_PER_DAY;
+    # core.datetime counts weekdays from Monday = 0.
+    let weekday = (weekdayFromDays(days) + 1) % 7;
+    return Civil(year = ymd[0], month = ymd[1], day = ymd[2], hour = rest / 60, minute = rest % 60, weekday = weekday);
+}
+
+pub func minute_at(year: int, month: int, day: int, hour: int, minute: int): int {
+    return daysFromCivil(year, month, day) * MINUTES_PER_DAY + hour * MINUTES_PER_HOUR + minute;
+}
+
+pub func start_of_next_day(at: int): int {
+    return (floor_div(at, MINUTES_PER_DAY) + 1) * MINUTES_PER_DAY;
+}
+
+pub func start_of_next_hour(at: int): int {
+    return (floor_div(at, MINUTES_PER_HOUR) + 1) * MINUTES_PER_HOUR;
+}
+
+pub func start_of_next_month(c: Civil): int {
+    if (c.month == 12) {
+        return minute_at(c.year + 1, 1, 1, 0, 0);
+    }
+    return minute_at(c.year, c.month + 1, 1, 0, 0);
+}
+
+# ---------------------------------------------------------------------------
+# Instants
+# ---------------------------------------------------------------------------
+
+pub func instant_of(at: int): Instant {
+    return Instant.fromMillis(at * MILLIS_PER_MINUTE);
+}
+
+# The first whole minute at or after an instant.
+pub func minute_from(t: Instant): int {
+    let ms = t.toMillis();
+    return 0 - floor_div(0 - ms, MILLIS_PER_MINUTE);
+}
+
+# `2026-10-20`, `2026-10-20 14:30`, `2026-10-20T14:30:05Z` ...
+let STAMP: Regex = Regex("^(?P<date>[0-9]{4}-[0-9]{2}-[0-9]{2})(?:[T ](?P<hour>[0-9]{2}):(?P<minute>[0-9]{2})(?::(?P<second>[0-9]{2}))?)?(?P<zone>Z|[+-][0-9]{2}:?[0-9]{2})?$");
+let EPOCH: Regex = Regex("^@(?P<seconds>-?[0-9]{1,12})$");
+
+# A time given on the command line, as the first minute at or after it.
+pub func parse_time(text: string, now: Instant): Result[int, string] {
+    let word = text.trim();
+    if (word == "now") {
+        return Ok(minute_from(now));
+    }
+    match EPOCH.findFirst(word) {
+        Some(m) => {
+            let seconds = m.groupByName("seconds").unwrap().toInt();
+            return Ok(minute_from(Instant.fromMillis(seconds * 1000)));
+        },
+        None => {},
+    }
+    let found = match STAMP.findFirst(word) {
+        Some(m) => m,
+        None => { return Err(i"invalid time '{$ text $}' (use YYYY-MM-DD[THH:MM[:SS]], @SECONDS or now)"); },
+    };
+    let zone = found.groupByName("zone") ?? "Z";
+    if (zone != "Z") {
+        return Err(i"invalid time '{$ text $}': only UTC times are supported");
+    }
+    let iso = found.groupByName("date").unwrap() + "T" + (found.groupByName("hour") ?? "00") + ":"
+        + (found.groupByName("minute") ?? "00") + ":" + (found.groupByName("second") ?? "00") + "Z";
+    # Instant.fromIso checks the calendar: 2026-02-30 and 24:00 are errors.
+    return match Instant.fromIso(iso) {
+        Ok(t) => Ok(minute_from(t)),
+        Err(reason) => Err(i"invalid time '{$ text $}': {$ reason $}"),
+    };
+}
+
+# ---------------------------------------------------------------------------
+# Printing
+# ---------------------------------------------------------------------------
+
+pub let WEEKDAY_NAMES: list[string] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+func two(n: int): string {
+    return padLeft(str(n), 2, "0");
+}
+
+pub func clock_text(hour: int, minute: int): string {
+    return two(hour) + ":" + two(minute);
+}
+
+# `Tue 2026-10-20 15:00`
+pub func format_human(at: int): string {
+    let c = civil(at);
+    let date = Date.new(c.year, c.month, c.day).isoformat();
+    return WEEKDAY_NAMES[c.weekday] + " " + date + " " + clock_text(c.hour, c.minute);
+}
+
+# `2026-10-20T15:00:00Z`
+pub func format_iso(at: int): string {
+    return instant_of(at).toIso();
+}
+
+# How long from `start` until `at`: `in 1d 2h 5m`, or `now`.
+pub func format_wait(start: int, at: int): string {
+    let wait: Duration = instant_of(at) - instant_of(start);
+    let total = wait.secondsPart() / 60;
+    if (total == 0) {
+        return "now";
+    }
+    var parts: list[string] = [];
+    let days = total / MINUTES_PER_DAY;
+    let hours = (total % MINUTES_PER_DAY) / 60;
+    let minutes = total % 60;
+    if (days > 0) {
+        parts.push(str(days) + "d");
+    }
+    if (hours > 0) {
+        parts.push(str(hours) + "h");
+    }
+    if (minutes > 0) {
+        parts.push(str(minutes) + "m");
+    }
+    return "in " + parts.join(" ");
+}
